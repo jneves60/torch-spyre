@@ -273,6 +273,12 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
         y_padded_size = list(y_size)
         y_padded_size[y_k_dim] = k_padded
         y_fx_node = _find_arg_fx_node(y_name)
+        if "val" not in y_fx_node.meta:
+            # View nodes (e.g. from .t()) patched into env by _patch_env were
+            # never traced by Dynamo and carry no FakeTensor in meta["val"].
+            # Synthesise one from the buffer we already have so lower_pad_sequence
+            # can read the original shape from arg_fx_node.meta["val"].shape.
+            y_fx_node.meta["val"] = torch.empty(y_size, dtype=dtype, device=device)
 
         y_orig_stl = y_buf.get_layout().device_layout
         y_padded_buf, y_new_ops = lower_pad_sequence(
