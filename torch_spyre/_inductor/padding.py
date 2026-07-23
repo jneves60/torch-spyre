@@ -273,14 +273,29 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
         y_padded_size = list(y_size)
         y_padded_size[y_k_dim] = k_padded
         y_fx_node = _find_arg_fx_node(y_name)
+        y_orig_stl = y_buf.get_layout().device_layout
         if "val" not in y_fx_node.meta:
             # View nodes (e.g. from .t()) patched into env by _patch_env were
             # never traced by Dynamo and carry no FakeTensor in meta["val"].
-            # Synthesise one from the buffer we already have so lower_pad_sequence
-            # can read the original shape from arg_fx_node.meta["val"].shape.
-            y_fx_node.meta["val"] = torch.empty(y_size, dtype=dtype, device=device)
+            # lower_pad_sequence reads both .shape and .stride() from meta["val"]:
+            #   - .shape  → validates padded_size rank (line 1166)
+            #   - .stride() → identifies the within-stick host dim by matching
+            #                  orig_stl.stride_map[-1] (line 1267)
+            # torch.empty would give row-major strides, which is wrong for
+            # transposed views (e.g. weight.t() has strides [1, K] not [N, 1]).
+            # Reconstruct the correct strides from orig_stl.stride_map: the
+            # stride_map entries are host strides, one per device dim, in the
+            # same order as device dims; stride_map[-1] is the within-stick
+            # element stride and the preceding entries cover the outer host dims.
+            stl_strides = [int(s) for s in y_orig_stl.stride_map if int(s) >= 0]
+            if len(stl_strides) == len(y_size):
+                y_fx_node.meta["val"] = torch.empty_strided(
+                    y_size, stl_strides, dtype=dtype, device=device
+                )
+            else:
+                # Fallback: row-major; correct for non-transposed buffers.
+                y_fx_node.meta["val"] = torch.empty(y_size, dtype=dtype, device=device)
 
-        y_orig_stl = y_buf.get_layout().device_layout
         y_padded_buf, y_new_ops = lower_pad_sequence(
             y_fx_node,
             padded_size=y_padded_size,
