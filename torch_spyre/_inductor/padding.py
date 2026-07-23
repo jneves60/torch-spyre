@@ -262,17 +262,31 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
 
         y_fx_node = _find_arg_fx_node(y_name)
         y_orig_stl = y_buf.get_layout().device_layout
+
+        # lower_pad_sequence identifies the within-stick host dim by matching
+        # orig_stl.stride_map[-1] against meta["val"].stride() (pass_utils.py:1267).
+        # For matmul y, N is always the stick dim (dim 1 of the logical [K, N] shape).
+        # Its within-stick host stride is stride_map[-1], which may not be 1 for
+        # non-contiguous layouts (e.g. a restickified transposed weight has
+        # stride_map[-1]=8 for a [cols=64, rows=8] weight).
+        # We must ensure meta["val"].stride() contains stride_map[-1] at the N dim
+        # regardless of whether meta["val"] already exists or needs to be synthesised.
+        sm_last = int(list(y_orig_stl.stride_map)[-1])
+        k_stride = n_val * sm_last  # K outer stride: N elements * within-stick stride
+        y_val_strides = batch_dims + [k_stride, sm_last]
+
         if "val" not in y_fx_node.meta:
             # View nodes (e.g. from .t()) patched into env by _patch_env were
             # never traced by Dynamo and carry no FakeTensor in meta["val"].
-            # lower_pad_sequence reads both .shape and .stride() from meta["val"]:
-            #   - .shape  → validates padded_size rank (pass_utils.py:1166)
-            #   - .stride() → identifies the within-stick host dim by matching
-            #                  orig_stl.stride_map[-1] (pass_utils.py:1267)
-            # Synthesise with the logical [K, N] shape in row-major order;
-            # K is dim 0 (stride N) and N is dim 1 (stride 1, the stick dim).
-            y_fx_node.meta["val"] = torch.empty(
-                y_logical_size, dtype=dtype, device=device
+            y_fx_node.meta["val"] = torch.empty_strided(
+                y_logical_size, y_val_strides, dtype=dtype, device=device
+            )
+        elif list(y_fx_node.meta["val"].stride()) != y_val_strides:
+            # The existing meta["val"] (e.g. from a restickify ComputedBuffer) has
+            # row-major strides [N, 1] which won't contain sm_last when sm_last != 1.
+            # Override the strides to match the actual within-stick host stride.
+            y_fx_node.meta["val"] = torch.empty_strided(
+                y_logical_size, y_val_strides, dtype=dtype, device=device
             )
 
         y_padded_buf, y_new_ops = lower_pad_sequence(
