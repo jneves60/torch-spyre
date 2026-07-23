@@ -55,13 +55,10 @@ from torch._inductor.ir import (
 from torch._inductor.virtualized import V
 
 from .constants import BATCH_MATMUL_OP
-from .ir import FixedTiledLayout
 from .logging_utils import get_inductor_logger
 from .pass_utils import (
     concretize_expr,
-    find_reduction_var,
     identify_matmul_inputs,
-    host_coordinates,
     lower_pad_sequence,
     replace_computed_buffer_body,
 )
@@ -214,24 +211,6 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
             )
             continue
 
-        reduction_var = find_reduction_var(x_dep, write_dep)
-
-        # y's K host dim: the dim whose host coordinate contains reduction_var.
-        y_buf_tmp = graph.get_buffer(y_dep.name)
-        y_host_k_dim: int | None = None
-        if y_buf_tmp is not None and isinstance(
-            y_buf_tmp.get_layout(), FixedTiledLayout
-        ):
-            y_h_coords = host_coordinates(y_buf_tmp.get_layout(), y_dep, None)
-            y_host_k_dim = next(
-                (
-                    i
-                    for i, c in enumerate(y_h_coords)
-                    if reduction_var in c.free_symbols
-                ),
-                None,
-            )
-
         x_name = x_dep.name
         y_name = y_dep.name
         x_buf = graph.get_buffer(x_name)
@@ -258,20 +237,29 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
         matmul_fx_node = next(iter(op.origins))
 
         # --- Pad y only ---
-        # y's K dimension is y's row (mb) dimension.  Padding it to K_padded
-        # ensures rows K..K_padded-1 of y are zero-filled so the hardware
-        # accumulates no contribution from those rows.
+        # _rebuild_matmul always indexes y as y[r0, i_N] — i.e. [K, N] in
+        # canonical order (dim 0 = K, dim 1 = N).  The padded buffer must
+        # therefore always be in [K_padded, N] layout, regardless of how K
+        # is oriented in the underlying physical buffer (e.g. weight.t() has
+        # the physical layout [N, K] but is accessed as [K, N] by the matmul).
+        #
+        # We derive the logical [K, N] shape directly from the matmul:
+        #   K = k_val  (from reduction_ranges)
+        #   N = op.get_size()[-1]  (last output dim, always N for any bmm shape)
+        # Batch dims (for multi-batch bmm) are taken from op.get_size()[:-1].
+        # We always pad dim 0 of this logical view (the K row dimension).
+        #
         # lower_pad_sequence builds the padded buffer at K_padded host size;
         # reduction_ranges is NOT changed.  superdsc._extend_matmul_k_to_padded
-        # widens sdsc_iteration_space[K] to K_padded at SDSC codegen time,
-        # reading K_padded from y's device_layout.device_size.
-        y_size = [concretize_expr(s) for s in y_buf.get_size()]
-        if y_host_k_dim is None:
-            y_k_dim = len(y_size) - 2
-        else:
-            y_k_dim = y_host_k_dim
-        y_padded_size = list(y_size)
+        # widens sdsc_iteration_space[K] to K_padded at SDSC codegen time.
+        out_size = [concretize_expr(s) for s in op.get_size()]
+        n_val = out_size[-1]
+        batch_dims = out_size[:-2]  # empty for 2D mm, [B] for bmm, [B,H] for 4D
+        y_logical_size = batch_dims + [k_val, n_val]
+        y_k_dim = len(batch_dims)  # always the first non-batch dim = dim 0 for 2D
+        y_padded_size = list(y_logical_size)
         y_padded_size[y_k_dim] = k_padded
+
         y_fx_node = _find_arg_fx_node(y_name)
         y_orig_stl = y_buf.get_layout().device_layout
         if "val" not in y_fx_node.meta:
@@ -281,13 +269,10 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
             #   - .shape  → validates padded_size rank (pass_utils.py:1166)
             #   - .stride() → identifies the within-stick host dim by matching
             #                  orig_stl.stride_map[-1] (pass_utils.py:1267)
-            # The correct host strides are already in y_buf.get_layout().stride,
-            # which reflects the actual view (e.g. [1, 8] for weight.t() on a
-            # [8, 8] buffer, vs row-major [8, 1]).  Using torch.empty would give
-            # wrong row-major strides and identify the wrong within-stick dim.
-            host_strides = [int(concretize_expr(s)) for s in y_buf.get_layout().stride]
-            y_fx_node.meta["val"] = torch.empty_strided(
-                y_size, host_strides, dtype=dtype, device=device
+            # Synthesise with the logical [K, N] shape in row-major order;
+            # K is dim 0 (stride N) and N is dim 1 (stride 1, the stick dim).
+            y_fx_node.meta["val"] = torch.empty(
+                y_logical_size, dtype=dtype, device=device
             )
 
         y_padded_buf, y_new_ops = lower_pad_sequence(
