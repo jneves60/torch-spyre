@@ -44,7 +44,7 @@ from .codegen.superdsc import (
     _should_use_k_fast_mapping,
 )
 from .constants import BATCH_MATMUL_OP, ELIDED_COPY_BACK_ATTR
-from .ir import FixedTiledLayout, SpyreConstantFallback, _resize_device_layout
+from .ir import FixedTiledLayout, SpyreConstantFallback
 from .logging_utils import get_inductor_logger
 from .loop_info import copy_op_metadata
 from .views import compute_coordinates, matching_dim
@@ -1233,26 +1233,29 @@ def lower_pad_sequence(
 
     # --- Build the device layout (SpyreTensorLayout) for the padded buffer. ---
     #
-    # orig_stl is the device layout of the original (unpadded) y buffer.
-    # We need a new STL for the padded [K_padded, N] buffer that:
-    #   - grows only the K dim (dim 0 of the core shape),
-    #   - preserves all stride_map entries, stick orientation, and element_arrangement.
+    # The padded buffer is always a fresh contiguous allocation in [K_padded, N]
+    # host order regardless of the original y buffer's layout.  The matmul
+    # inner_fn (and _rebuild_matmul) always indexes y as y[r0=K, i_N=N], so
+    # the padded buffer must be contiguous with K at dim 0 and N (stick) at
+    # dim 1.  Non-contiguous stickifications of the original weight (e.g. a
+    # restickified transposed weight with stride_map[-1]!=1) must NOT be
+    # inherited: inheriting them produces unsupported compound stick expressions
+    # such as "d1 + floor(d0/8)" in _check_stick_expr_supported.
     #
-    # _resize_device_layout does exactly this: it matches device dims to host dims
-    # by size (with stride tiebreaker), updates device_size for the grown dim, and
-    # leaves stride_map unchanged for non-contiguous (transposed) dims.  This
-    # handles all cases including restickified transposed layouts where
-    # stride_map[-1] != 1.
-    #
-    # Strip phantom leading dims (added by mm_to_bmm_pass) before passing to
-    # _resize_device_layout: stride_map has one entry per device dim, and
-    # device dims = host dims + 1, so orig_host_ndim = len(stride_map) - 1.
+    # Strip phantom leading dims (added by mm_to_bmm_pass) before building:
+    # stride_map has one entry per device dim, device dims = host dims + 1,
+    # so orig_host_ndim = len(stride_map) - 1.
     orig_host_ndim = len(list(orig_stl.stride_map)) - 1
     n_phantom = len(padded_size) - orig_host_ndim
     padded_core = padded_size[n_phantom:]
-    orig_core = list(arg_fx_node.meta["val"].shape)[n_phantom:]
 
-    padded_stl = _resize_device_layout(orig_stl, orig_core, padded_core)
+    # Build row-major strides for padded_core: stick dim is always last.
+    core_stride = [1] * len(padded_core)
+    for i in range(len(padded_core) - 2, -1, -1):
+        core_stride[i] = core_stride[i + 1] * padded_core[i + 1]
+    dim_order_core = list(range(len(padded_core)))  # [0, 1, ...] stick last
+
+    padded_stl = SpyreTensorLayout(padded_core, core_stride, dtype, dim_order_core)
     host_layout = padded_buf.layout
     padded_buf.layout = FixedTiledLayout(
         host_layout.device,
