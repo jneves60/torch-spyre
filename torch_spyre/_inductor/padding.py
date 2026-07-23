@@ -278,23 +278,17 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
             # View nodes (e.g. from .t()) patched into env by _patch_env were
             # never traced by Dynamo and carry no FakeTensor in meta["val"].
             # lower_pad_sequence reads both .shape and .stride() from meta["val"]:
-            #   - .shape  → validates padded_size rank (line 1166)
+            #   - .shape  → validates padded_size rank (pass_utils.py:1166)
             #   - .stride() → identifies the within-stick host dim by matching
-            #                  orig_stl.stride_map[-1] (line 1267)
-            # torch.empty would give row-major strides, which is wrong for
-            # transposed views (e.g. weight.t() has strides [1, K] not [N, 1]).
-            # Reconstruct the correct strides from orig_stl.stride_map: the
-            # stride_map entries are host strides, one per device dim, in the
-            # same order as device dims; stride_map[-1] is the within-stick
-            # element stride and the preceding entries cover the outer host dims.
-            stl_strides = [int(s) for s in y_orig_stl.stride_map if int(s) >= 0]
-            if len(stl_strides) == len(y_size):
-                y_fx_node.meta["val"] = torch.empty_strided(
-                    y_size, stl_strides, dtype=dtype, device=device
-                )
-            else:
-                # Fallback: row-major; correct for non-transposed buffers.
-                y_fx_node.meta["val"] = torch.empty(y_size, dtype=dtype, device=device)
+            #                  orig_stl.stride_map[-1] (pass_utils.py:1267)
+            # The correct host strides are already in y_buf.get_layout().stride,
+            # which reflects the actual view (e.g. [1, 8] for weight.t() on a
+            # [8, 8] buffer, vs row-major [8, 1]).  Using torch.empty would give
+            # wrong row-major strides and identify the wrong within-stick dim.
+            host_strides = [int(concretize_expr(s)) for s in y_buf.get_layout().stride]
+            y_fx_node.meta["val"] = torch.empty_strided(
+                y_size, host_strides, dtype=dtype, device=device
+            )
 
         y_padded_buf, y_new_ops = lower_pad_sequence(
             y_fx_node,
