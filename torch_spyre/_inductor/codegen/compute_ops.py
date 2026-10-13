@@ -1372,9 +1372,6 @@ def generate_sdsc(
                     for dim, num_wk_slices in sdsc_spec.work_slices.items()
                 },
                 "coreIdToWkSlice_": core_id_to_wk_slice,
-                "coreIdToDscSchedule": {
-                    str(c): [[-1, 0, 0, 0]] for c in active_core_ids
-                },
                 "dscs_": [
                     {
                         sdsc_spec.opfunc: {
