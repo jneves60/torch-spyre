@@ -1364,7 +1364,6 @@ def generate_sdsc(
                     else None
                 ),
                 "numCoresUsed_": len(active_core_ids),
-                "coreIdToDsc_": {str(c): 0 for c in active_core_ids},
                 # The top-level map is the operation schedule. Each shuffle
                 # tensor's physical owners are carried separately on its
                 # allocation coordinates below.
