@@ -1487,7 +1487,6 @@ def generate_sdsc(
                                 for i, tensor in enumerate(sdsc_spec.args)
                             },
                             **(
-                                {"pdsRelation_": {"isPdsReuse": 1}}
                                 if sdsc_spec.pds_reuse
                                 else {}
                             ),
