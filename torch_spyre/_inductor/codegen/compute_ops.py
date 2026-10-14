@@ -1376,7 +1376,6 @@ def generate_sdsc(
                     {
                         sdsc_spec.opfunc: {
                             "numCoresUsed_": len(active_core_ids),
-                            "numCoreletsUsed_": 1,
                             "coreIdsUsed_": list(active_core_ids),
                             "N_": {
                                 "name_": "n",
@@ -1689,7 +1688,6 @@ def generate_sdsc(
                                         "dataFormat_": sdsc_spec.data_format.name,
                                         "fidelity_": "regular",
                                     },
-                                    "location": "Inner",
                                     "inputLabeledDs": [
                                         f"Tensor{i}-idx{i}"
                                         for i in range(sdsc_spec.num_inputs)
@@ -1717,7 +1715,6 @@ def generate_sdsc(
                 # inputSymbolsAndTags_ maps symbol ID -> pytorch symbol name for the runtime.
                 **(
                     {
-                        "datadscs_": [],
                         "dimToSymbolMappingOpcodeCorrection_": {},
                         "inputSymbolsAndTags_": {
                             str(sym_id): pytorch_sym
