@@ -1345,7 +1345,6 @@ def generate_sdsc(
         # them. Restore them for every non-depthwise op so forward conv2d
         # matches its golden SDSC.
         if sdsc_spec.opfunc != DEPTHWISE_CONV2D_OP:
-            extra["dsOffset"] = 0
             extra["allocateNode_"] = alloc_node
         return extra
 
@@ -1427,9 +1426,6 @@ def generate_sdsc(
                                             symbolic_dims, sdsc_spec.work_slices
                                         ),
                                         "maxSymbolicVolume_": {},
-                                        "coreletSplit_": {},
-                                        "rowSplit_": {},
-                                        "peSfpSplit_": {},
                                         "paddingSizes_": sdsc_spec.padding_sizes_per_core
                                         if sdsc_spec.padding_sizes_per_core
                                         else sdsc_spec.padding_sizes,
@@ -1445,9 +1441,6 @@ def generate_sdsc(
                                             symbolic_dims, sdsc_spec.work_slices
                                         ),
                                         "maxSymbolicVolume_": {},
-                                        "coreletSplit_": {},
-                                        "rowSplit_": {},
-                                        "peSfpSplit_": {},
                                         "paddingSizes_": sdsc_spec.padding_sizes_per_core
                                         if sdsc_spec.padding_sizes_per_core
                                         else sdsc_spec.padding_sizes,
